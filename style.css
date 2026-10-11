@@ -613,6 +613,23 @@
     line-height: 1.4;
     opacity: .66;
 }
+/* 规则注入预览：把当前注入配置和正文摊开，方便对照世界书排查 */
+.ntr-rule-preview {
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    max-height: 240px;
+    overflow: auto;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, .08);
+    background: rgba(0, 0, 0, .32);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .76em;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    scrollbar-width: thin;
+    color: inherit;
+}
 #ntr-detector-panel .ntr-greet-preview {
     margin-top: 3px;
     padding: 6px 8px;

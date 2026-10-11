@@ -26,6 +26,54 @@ const DEFAULT_REWRITE_PROMPT = `你是角色卡开场白的改写助手。用户
 - 与上述内容无关的文字尽量逐字保留，不要顺手润色、不要重写无关段落。
 - 保持原有叙事人称与语气。
 - 不要添加解释、标题、前后缀或注释，只输出改写后的正文。`;
+// 彻底重写模式：当整段都建立在「角色已被他人调教／占有」这类前提上时，逐句修正救不回来，只能整段重写。
+const REWRITE_DEEP_SUFFIX = `
+
+【本次为彻底重写模式】
+按上述要求逐句处理之后，如果某一段仍然无法干净地保留（例如整段都建立在「角色已被他人调教、占有或留下痕迹」的前提上），请直接重写这一段：保留人物身份、场景与叙事语气，把涉及第三方的亲密、性、支配、调教情节整体替换为不含这些元素的合理剧情。宁可改动大一些，也不要留下任何存疑的描写。`;
+function withRewriteStrength(prompt) {
+    return settings.rewriteMode === 'deep' ? `${prompt}${REWRITE_DEEP_SUFFIX}` : prompt;
+}
+// 长文本分块：整段一次性丢给模型时，输出上限会把结果截断，表现就是「只改了一半、后半段没动」。
+// 超过阈值就按段落切块，逐块改写再拼回去。
+function splitIntoChunks(text, limit) {
+    const blocks = String(text).split(/\n{2,}/);
+    const chunks = [];
+    let buffer = '';
+    for (const block of blocks) {
+        if (block.length > limit) {
+            if (buffer) { chunks.push(buffer); buffer = ''; }
+            let rest = block;
+            while (rest.length > limit) {
+                // cut 是「切点字符的下标」，取不到句读就退回 limit-1，保证切出来的块不会超过 limit
+                let cut = rest.lastIndexOf('。', limit - 1);
+                if (cut < limit * 0.5) cut = rest.lastIndexOf('\n', limit - 1);
+                if (cut < limit * 0.5) cut = limit - 1;
+                chunks.push(rest.slice(0, cut + 1));
+                rest = rest.slice(cut + 1);
+            }
+            if (rest.trim()) buffer = rest;
+            continue;
+        }
+        if (buffer && buffer.length + block.length + 2 > limit) { chunks.push(buffer); buffer = ''; }
+        buffer = buffer ? `${buffer}\n\n${block}` : block;
+    }
+    if (buffer.trim()) chunks.push(buffer);
+    return chunks.filter(chunk => chunk.trim());
+}
+async function rewriteText(text, config, signal, log, hints) {
+    const limit = clamp(settings.rewriteChunkSize, 400, 20000, 2000);
+    const chunks = splitIntoChunks(text, limit);
+    if (chunks.length <= 1) return requestRewrite(text, config, signal, log, hints);
+    log(`原文 ${text.length} 字，超过 ${limit} 字阈值，分 ${chunks.length} 段改写。`);
+    const results = [];
+    for (let i = 0; i < chunks.length; i++) {
+        if (signal?.aborted) throw abortError();
+        log(`正在改写第 ${i + 1}/${chunks.length} 段（${chunks[i].length} 字）…`);
+        results.push(await requestRewrite(chunks[i], config, signal, log, '', `这是全文的第 ${i + 1}/${chunks.length} 段，只改写本段并只输出本段结果，不要补充前后段的内容。`));
+    }
+    return results.join('\n\n');
+}
 // 内置「纯爱规则」：隐藏注入，界面不展示、也没有开关（按需求强制生效）。
 // 内容取自随附的世界书《绝对纯爱指令》；{{user}} 等宏由酒馆的 substituteParams 在注入时替换。
 const PURE_LOVE_RULE = `<纯爱规则>
@@ -69,7 +117,9 @@ const DEFAULTS = {
     concurrency: 3, timeout: 30, chunkSize: 2000, prompt: '', rewritePrompt: '', skipPrefilter: false,
     scanChat: false, realtime: false, autoCard: true, floatMode: false, minimized: false,
     floatX: null, floatY: null, launcherX: null, launcherY: null,
-    checkUpdate: true, updateCheckedAt: 0, cache: {},
+    checkUpdate: true, updateCheckedAt: 0,
+    rulePosition: 'both', ruleDepth: 0, ruleRole: 0, ruleBoost: true,
+    rewriteMode: 'standard', rewriteChunkSize: 2000, cache: {},
 };
 const KEYWORDS = /ntr|netorare|netori|netorase|寝取(?:られ|り)?|绿帽|綠帽|绿奴|綠奴|戴绿|戴綠|被绿|被綠|出轨|出軌|偷情|劈腿|cuckold|cuckquean|cheating/i;
 const FIELDS = ['name', 'description', 'personality', 'scenario', 'first_mes', 'mes_example', 'creator_notes', 'system_prompt', 'post_history_instructions'];
@@ -133,9 +183,39 @@ function note(message, type = 'info') {
 function save() { saveSettingsDebounced(); }
 // 内置纯爱规则：每次生成时同时注入系统提示区与聊天内 depth 0（离最新消息最近，约束最强）。
 // 不写入角色卡或世界书，关掉插件或刷新页面即失效。
+// 规则注入。位置 / 深度 / 角色都做成可配置：不同预设与模型对「规则放在哪」的敏感度差别很大。
+// 写死成 IN_PROMPT + depth 0 时，若模型只在思考里认规则、落笔就忘，通常就是规则离生成点太远——
+// 把位置改成「仅聊天内」并把深度调小，效果往往立刻不同。
+const RULE_KEYS = ['ntr-pure-love-system', 'ntr-pure-love-chat', 'ntr-pure-love-boost'];
+const RULE_ROLES = [extension_prompt_roles.SYSTEM, extension_prompt_roles.USER, extension_prompt_roles.ASSISTANT];
 function applyPureLoveRule() {
-    setExtensionPrompt('ntr-pure-love-system', PURE_LOVE_RULE, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
-    setExtensionPrompt('ntr-pure-love-chat', PURE_LOVE_ENFORCER, extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
+    const depth = clamp(settings.ruleDepth, 0, 20, 0);
+    const role = RULE_ROLES[Number(settings.ruleRole)] ?? extension_prompt_roles.SYSTEM;
+    const position = ['both', 'prompt', 'chat'].includes(settings.rulePosition) ? settings.rulePosition : 'both';
+    const useFull = position === 'both' || position === 'prompt';
+    const useChat = position === 'both' || position === 'chat';
+    // 三个 key 每次都给值（用不到的写空串），这样改配置不会把上一次的内容残留在 extension_prompts 里
+    setExtensionPrompt(RULE_KEYS[0], useFull ? PURE_LOVE_RULE : '', extension_prompt_types.IN_PROMPT, 0, false, role);
+    setExtensionPrompt(RULE_KEYS[1], useChat ? PURE_LOVE_RULE : '', extension_prompt_types.IN_CHAT, depth, false, role);
+    setExtensionPrompt(RULE_KEYS[2], settings.ruleBoost ? PURE_LOVE_ENFORCER : '', extension_prompt_types.IN_CHAT, depth + 4, false, role);
+}
+// 把当前的注入配置和规则正文摊开给用户看，方便对照世界书的设置排查
+function describePureLoveRule() {
+    const depth = clamp(settings.ruleDepth, 0, 20, 0);
+    const role = ['system', 'user', 'assistant'][Number(settings.ruleRole)] ?? 'system';
+    const label = settings.rulePosition === 'chat' ? '仅聊天内' : settings.rulePosition === 'prompt' ? '仅故事文本之后' : '故事文本之后 + 聊天内';
+    const lines = [
+        `注入位置：${label}`,
+        `聊天内深度：${depth}${depth === 0 ? '（最靠后，紧贴生成点）' : ''}`,
+        `注入角色：${role}`,
+        `强化注入：${settings.ruleBoost ? `开启（在第 ${depth + 4} 条处再补一条简版）` : '关闭'}`,
+        '',
+        '—— 注入的规则正文 ——',
+        '',
+        PURE_LOVE_RULE,
+    ];
+    if (settings.ruleBoost) lines.push('', '—— 强化注入的简版 ——', '', PURE_LOVE_ENFORCER);
+    return lines.join('\n');
 }
 function clamp(value, min, max, fallback) {
     const n = Number(value);
@@ -477,9 +557,9 @@ async function requestRewrite(text, config, signal, log = () => { }, hints = '')
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.key}` },
             body: JSON.stringify({ model: config.model, temperature: config.temperature, stream: false,
                 messages: [
-                    { role: 'system', content: config.rewritePrompt },
-                    // 检测命中的片段作为补充说明附在原文后面，让模型知道该重点处理哪里
-                    { role: 'user', content: hints ? `${text}\n\n（补充说明：${hints}）` : text },
+                    { role: 'system', content: withRewriteStrength(config.rewritePrompt) },
+                    // 补充说明（检测命中的片段、分块序号）附在原文后面，让模型知道该重点处理哪里
+                    { role: 'user', content: hints ? `${text}\n\n【补充说明】${hints}` : text },
                 ] }),
             signal: controller.signal,
         });
@@ -707,7 +787,7 @@ function openGreetingEditor(target) {
         write('正在请求模型改写…');
         try {
             const hints = evidence.length ? `检测模型认为以下原文片段有问题，请务必连同它们一起改掉：${evidence.join('；')}` : '';
-            area.value = await requestRewrite(area.value, config, undefined, write, hints);
+            area.value = await rewriteText(area.value, config, undefined, write, hints);
             write('改写完成。确认内容后点「保存到角色卡」。');
         } catch (error) { write(`改写失败：${error.message}`); }
         finally { rewrite.disabled = false; }
@@ -883,9 +963,25 @@ function buildUI() {
       <label>分块字符数<input id="ntr-chunk" class="text_pole" type="number" min="200" max="20000"></label></div>
       <div class="ntr-actions"><button id="ntr-models" class="menu_button" type="button"><i class="fa-solid fa-list-ul"></i>拉取模型列表</button><button id="ntr-test" class="menu_button" type="button"><i class="fa-solid fa-satellite-dish"></i>测试连接</button><button id="ntr-clear" class="menu_button" type="button"><i class="fa-solid fa-broom"></i>清除缓存</button></div>
       </section>
+      <section class="ntr-card"><h4><i class="fa-solid fa-shield-halved"></i>纯爱规则注入</h4>
+      <div class="ntr-hint">规则在每次生成时静默注入，不写入角色卡或世界书。若模型「思考时认规则、落笔就忘」，多半是注入位置离生成点太远——试着把位置改成「仅聊天内」，深度调到 0～2。</div>
+      <label>注入位置<select id="ntr-rule-position" class="text_pole"><option value="both">故事文本之后 + 聊天内（默认）</option><option value="chat">仅聊天内（离生成点最近，通常最有效）</option><option value="prompt">仅故事文本之后</option></select></label>
+      <div class="ntr-grid">
+      <label>聊天内深度（0 最靠后）<input id="ntr-rule-depth" class="text_pole" type="number" min="0" max="20" step="1"></label>
+      <label>注入角色<select id="ntr-rule-role" class="text_pole"><option value="0">system</option><option value="1">user</option><option value="2">assistant</option></select></label>
+      </div>
+      <label class="ntr-check"><input id="ntr-rule-boost" type="checkbox">在更靠前的深度再补一条简版（提高遵循度）</label>
+      <div class="ntr-actions"><button id="ntr-rule-preview" class="menu_button" type="button"><i class="fa-solid fa-eye"></i>查看当前注入</button></div>
+      <pre id="ntr-rule-preview-box" class="ntr-rule-preview ntr-hidden"></pre>
+      </section>
       <section class="ntr-card"><h4><i class="fa-solid fa-comment-dots"></i>提示词</h4>
       <label>自定义检测系统提示词（留空使用内置提示词）<textarea id="ntr-prompt" class="text_pole" rows="5"></textarea></label>
       <label>自定义改写系统提示词（留空使用内置提示词。内置版本会随插件更新；若这里填过内容就会覆盖它，想用新版请先清空）<textarea id="ntr-rewrite" class="text_pole" rows="4"></textarea></label>
+      <div class="ntr-grid">
+      <label>改写强度<select id="ntr-rewrite-mode" class="text_pole"><option value="standard">标准（逐句修正）</option><option value="deep">彻底重写（可整段重写）</option></select></label>
+      <label>长文分块阈值（字）<input id="ntr-rewrite-chunk" class="text_pole" type="number" min="400" max="20000" step="100"></label>
+      </div>
+      <div class="ntr-hint">阈值用于避免长开场白被输出上限截断（表现为「只改了一半、后半段没动」）。超过阈值会按段落分块逐段改写再拼回。</div>
       <label class="ntr-check"><input id="ntr-skip" type="checkbox">跳过关键词粗筛，全部送检</label>
       </section>
       <section class="ntr-card"><h4><i class="fa-solid fa-bell"></i>检测行为</h4>
@@ -917,7 +1013,7 @@ function buildUI() {
     document.body.append(floatBox, launcher);
     // 先挂到文档中，保证下面的选择器能取到表单控件；浮窗模式稍后由 applyPanelMode 搬移。
     document.querySelector('#extensions_settings')?.append(panel);
-    const map = { '#ntr-url': 'baseUrl', '#ntr-key': 'apiKey', '#ntr-model': 'model', '#ntr-temp': 'temperature', '#ntr-concurrency': 'concurrency', '#ntr-timeout': 'timeout', '#ntr-chunk': 'chunkSize', '#ntr-prompt': 'prompt', '#ntr-rewrite': 'rewritePrompt', '#ntr-skip': 'skipPrefilter', '#ntr-chat': 'scanChat', '#ntr-realtime': 'realtime', '#ntr-autocard': 'autoCard', '#ntr-update-auto': 'checkUpdate' };
+    const map = { '#ntr-url': 'baseUrl', '#ntr-key': 'apiKey', '#ntr-model': 'model', '#ntr-temp': 'temperature', '#ntr-concurrency': 'concurrency', '#ntr-timeout': 'timeout', '#ntr-chunk': 'chunkSize', '#ntr-prompt': 'prompt', '#ntr-rewrite': 'rewritePrompt', '#ntr-skip': 'skipPrefilter', '#ntr-chat': 'scanChat', '#ntr-realtime': 'realtime', '#ntr-autocard': 'autoCard', '#ntr-update-auto': 'checkUpdate', '#ntr-rule-position': 'rulePosition', '#ntr-rule-depth': 'ruleDepth', '#ntr-rule-role': 'ruleRole', '#ntr-rule-boost': 'ruleBoost', '#ntr-rewrite-mode': 'rewriteMode', '#ntr-rewrite-chunk': 'rewriteChunkSize' };
     for (const [selector, key] of Object.entries(map)) {
         const input = $(selector);
         input.prop('type') === 'checkbox' ? input.prop('checked', settings[key]) : input.val(settings[key]);
@@ -928,6 +1024,13 @@ function buildUI() {
     $('#ntr-json').on('click', () => downloadReport('json'));
     $('#ntr-md').on('click', () => downloadReport('md'));
     $('#ntr-clear').on('click', () => { settings.cache = {}; save(); note('检测缓存已清除。', 'success'); });
+    // 注入参数一变就重新注入，不用刷新页面
+    $('#ntr-rule-position, #ntr-rule-depth, #ntr-rule-role, #ntr-rule-boost').on('change', () => applyPureLoveRule());
+    $('#ntr-rule-preview').on('click', () => {
+        const box = $('#ntr-rule-preview-box');
+        if (!box.hasClass('ntr-hidden')) return box.addClass('ntr-hidden');
+        box.text(describePureLoveRule()).removeClass('ntr-hidden');
+    });
     $('#ntr-models').on('click', async () => {
         const button = $('#ntr-models');
         const original = button.html();
