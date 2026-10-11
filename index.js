@@ -8,8 +8,24 @@ NTR（寝取られ / Netorare）指：存在稳定伴侣关系（恋人、夫妻
 以下情况不算 NTR：单纯后宫、双方知情同意的开放关系、没有既定伴侣关系的三角恋、仅口头调情未涉及背叛。
 只输出 JSON，不要输出任何其他内容：
 {"has_ntr": true 或 false, "confidence": 0 到 1 的数字, "categories": ["命中的类别"], "evidence": ["支撑判定的原文片段，直接引用"], "summary": "一句话中文说明"}`;
-const DEFAULT_REWRITE_PROMPT = `你是文本改写助手。用户会给你一段角色卡开场白。请在不改变人物、设定与整体剧情走向的前提下改写这段文字，删除或替换其中涉及 NTR（伴侣被第三者夺走、出轨、偷情、绿帽等）的内容，使其不再包含 NTR。
-要求：保持原有的叙事人称与语气；保持段落结构；不要添加解释、标题或前后缀；只输出改写后的正文。`;
+// 内置改写提示词。要点：① 不局限于典型 NTR，「被他人抚摸、调教、标记」这类也算；
+// ② 明确要求对话/动作/环境/心理/旁白一起改，否则模型容易只动对白而把叙述留下。
+const DEFAULT_REWRITE_PROMPT = `你是角色卡开场白的改写助手。用户会给你一段开场白，请改写它，使故事里除了「{{user}}」之外，没有任何人对角色做出亲密或性相关的举动，角色也不会对他人做出这类举动。
+
+必须清除的内容（不限于典型 NTR）：
+1. 第三方对角色本人、或角色对第三方的身体接触与性相关行为：抚摸、触碰敏感部位、搂抱、亲吻、调教、驯化、标记、留下痕迹、窥视、挑逗、性行为等；
+2. 伴侣被夺走、出轨、偷情、绿帽、寝取（NTR）等背叛情节；
+3. 角色被他人支配、服从、调教成某种状态，或对此表现出顺从、期待、习惯的描写；
+4. 上述内容在回忆、暗示、伏笔、玩笑式提及中的出现，以及旁白和心理活动里的相关叙述。
+
+应当保留的内容：普通社交接触（握手、递东西、并肩走路、搀扶救治）、与第三方的正常对话、角色与「{{user}}」之间的任何亲密内容、以及与此无关的全部剧情。
+
+改写要求：
+- 对话、动作描写、环境描写、心理描写、旁白都要一并处理。不能只改对白或只改旁白，把「被摸」「被调教」这类叙述留在原文里。
+- 涉及删除的地方，用合理的替代描写自然衔接，保持篇幅与段落结构基本不变，不要出现空段或逻辑断裂。
+- 与上述内容无关的文字尽量逐字保留，不要顺手润色、不要重写无关段落。
+- 保持原有叙事人称与语气。
+- 不要添加解释、标题、前后缀或注释，只输出改写后的正文。`;
 // 内置「纯爱规则」：隐藏注入，界面不展示、也没有开关（按需求强制生效）。
 // 内容取自随附的世界书《绝对纯爱指令》；{{user}} 等宏由酒馆的 substituteParams 在注入时替换。
 const PURE_LOVE_RULE = `<纯爱规则>
@@ -125,6 +141,34 @@ function clamp(value, min, max, fallback) {
     const n = Number(value);
     return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
 }
+// 从 OpenAI 兼容接口的 /models 拉取可选模型，省得换模型时手打名字。
+async function fetchModels() {
+    const base = String(settings.baseUrl).trim().replace(/\/+$/, '');
+    if (!base) throw new Error('请先填写 API Base URL。');
+    let url;
+    try { url = new URL(`${base}/models`); } catch { throw new Error('API Base URL 不是合法地址。'); }
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('API Base URL 须为 HTTP(S) 地址。');
+    const key = String(settings.apiKey || '').trim();
+    const response = await fetch(url.href, { headers: key ? { Authorization: `Bearer ${key}` } : {}, cache: 'no-cache' });
+    if (response.status === 401 || response.status === 403) throw new Error('API Key 无效，或该接口不允许读取模型列表（401/403）。');
+    if (!response.ok) throw new Error(`拉取模型列表失败（HTTP ${response.status}）${await readErrorSnippet(response)}`);
+    let body;
+    try { body = await response.json(); } catch { throw new Error('接口返回的不是 JSON，可能不支持 /models，请手动填写模型名称。'); }
+    // 各家中转站的返回结构不完全一致，这里兼容几种常见写法
+    const raw = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : Array.isArray(body) ? body : [];
+    const ids = raw.map(item => (typeof item === 'string' ? item : item?.id ?? item?.name)).filter(id => typeof id === 'string' && id.trim());
+    const unique = [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+    if (!unique.length) throw new Error('接口没有返回任何模型，也可能是不支持 /models，请手动填写。');
+    return unique;
+}
+// 提示词是插件自己拼好直接发给模型的，不经过酒馆的宏替换，
+// 所以这里的 {{user}} 手动换成用户当前的名字（取不到就退回「用户」二字）。
+function substituteUserName(text) {
+    if (typeof text !== 'string' || !/\{\{user\}\}/i.test(text)) return text;
+    let name = '';
+    try { name = String(getContext()?.name1 ?? '').trim(); } catch { name = ''; }
+    return text.replace(/\{\{user\}\}/gi, name || '用户');
+}
 function currentConfig() {
     const base = String(settings.baseUrl).trim().replace(/\/+$/, '');
     const url = new URL(`${base}/chat/completions`);
@@ -138,8 +182,8 @@ function currentConfig() {
         concurrency: clamp(settings.concurrency, 1, 10, 3),
         timeout: clamp(settings.timeout, 5, 300, 30) * 1000,
         chunkSize: clamp(settings.chunkSize, 200, 20000, 2000),
-        prompt: settings.prompt.trim() || DEFAULT_PROMPT,
-        rewritePrompt: settings.rewritePrompt.trim() || DEFAULT_REWRITE_PROMPT,
+        prompt: substituteUserName(settings.prompt.trim() || DEFAULT_PROMPT),
+        rewritePrompt: substituteUserName(settings.rewritePrompt.trim() || DEFAULT_REWRITE_PROMPT),
         skipPrefilter: Boolean(settings.skipPrefilter),
     };
 }
@@ -419,7 +463,7 @@ async function readErrorSnippet(response) {
 }
 // 改写请求：补上超时（改写比分类慢，至少给 90 秒），去掉 redirect: 'error'（部分中转站会 302，
 // 被拦下后就完全不发第二次请求），并把 HTTP 状态与响应片段一并抛出，方便定位「到底发没发出去」。
-async function requestRewrite(text, config, signal, log = () => { }) {
+async function requestRewrite(text, config, signal, log = () => { }, hints = '') {
     const timeout = Math.max(config.timeout, 90000);
     const controller = new AbortController();
     const onAbort = () => controller.abort();
@@ -432,7 +476,11 @@ async function requestRewrite(text, config, signal, log = () => { }) {
             method: 'POST', mode: 'cors', credentials: 'omit',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.key}` },
             body: JSON.stringify({ model: config.model, temperature: config.temperature, stream: false,
-                messages: [{ role: 'system', content: config.rewritePrompt }, { role: 'user', content: text }] }),
+                messages: [
+                    { role: 'system', content: config.rewritePrompt },
+                    // 检测命中的片段作为补充说明附在原文后面，让模型知道该重点处理哪里
+                    { role: 'user', content: hints ? `${text}\n\n（补充说明：${hints}）` : text },
+                ] }),
             signal: controller.signal,
         });
         if (response.status === 401 || response.status === 403) throw new Error('API Key 无效或模型权限不足（401/403）。');
@@ -658,7 +706,8 @@ function openGreetingEditor(target) {
         rewrite.disabled = true;
         write('正在请求模型改写…');
         try {
-            area.value = await requestRewrite(area.value, config, undefined, write);
+            const hints = evidence.length ? `检测模型认为以下原文片段有问题，请务必连同它们一起改掉：${evidence.join('；')}` : '';
+            area.value = await requestRewrite(area.value, config, undefined, write, hints);
             write('改写完成。确认内容后点「保存到角色卡」。');
         } catch (error) { write(`改写失败：${error.message}`); }
         finally { rewrite.disabled = false; }
@@ -827,16 +876,16 @@ function buildUI() {
       <section class="ntr-card"><h4><i class="fa-solid fa-plug"></i>模型接口</h4>
       <label>API Base URL<input id="ntr-url" class="text_pole" type="url" autocomplete="off"></label>
       <label>API Key<input id="ntr-key" class="text_pole" type="password" autocomplete="off"></label>
-      <label>模型名称<input id="ntr-model" class="text_pole" type="text"></label>
+      <label>模型名称<input id="ntr-model" class="text_pole" type="text" list="ntr-model-list" autocomplete="off" placeholder="可手填，也可用下方按钮拉取"><datalist id="ntr-model-list"></datalist></label>
       <div class="ntr-grid"><label>温度<input id="ntr-temp" class="text_pole" type="number" min="0" max="2" step="0.1"></label>
       <label>最大并发数<input id="ntr-concurrency" class="text_pole" type="number" min="1" max="10"></label>
       <label>超时（秒）<input id="ntr-timeout" class="text_pole" type="number" min="5" max="300"></label>
       <label>分块字符数<input id="ntr-chunk" class="text_pole" type="number" min="200" max="20000"></label></div>
-      <div class="ntr-actions"><button id="ntr-test" class="menu_button"><i class="fa-solid fa-satellite-dish"></i>测试连接</button><button id="ntr-clear" class="menu_button"><i class="fa-solid fa-broom"></i>清除缓存</button></div>
+      <div class="ntr-actions"><button id="ntr-models" class="menu_button" type="button"><i class="fa-solid fa-list-ul"></i>拉取模型列表</button><button id="ntr-test" class="menu_button" type="button"><i class="fa-solid fa-satellite-dish"></i>测试连接</button><button id="ntr-clear" class="menu_button" type="button"><i class="fa-solid fa-broom"></i>清除缓存</button></div>
       </section>
       <section class="ntr-card"><h4><i class="fa-solid fa-comment-dots"></i>提示词</h4>
       <label>自定义检测系统提示词（留空使用内置提示词）<textarea id="ntr-prompt" class="text_pole" rows="5"></textarea></label>
-      <label>自定义改写系统提示词（留空使用内置提示词）<textarea id="ntr-rewrite" class="text_pole" rows="4"></textarea></label>
+      <label>自定义改写系统提示词（留空使用内置提示词。内置版本会随插件更新；若这里填过内容就会覆盖它，想用新版请先清空）<textarea id="ntr-rewrite" class="text_pole" rows="4"></textarea></label>
       <label class="ntr-check"><input id="ntr-skip" type="checkbox">跳过关键词粗筛，全部送检</label>
       </section>
       <section class="ntr-card"><h4><i class="fa-solid fa-bell"></i>检测行为</h4>
@@ -879,6 +928,19 @@ function buildUI() {
     $('#ntr-json').on('click', () => downloadReport('json'));
     $('#ntr-md').on('click', () => downloadReport('md'));
     $('#ntr-clear').on('click', () => { settings.cache = {}; save(); note('检测缓存已清除。', 'success'); });
+    $('#ntr-models').on('click', async () => {
+        const button = $('#ntr-models');
+        const original = button.html();
+        button.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i>拉取中…');
+        try {
+            const models = await fetchModels();
+            const list = document.getElementById('ntr-model-list');
+            list.innerHTML = '';
+            for (const id of models) list.append(new Option(id, id));
+            note(`已拉取 ${models.length} 个模型；点模型名称输入框即可选择，也可以继续手填。`, 'success');
+        } catch (error) { note(error.message, 'error'); }
+        finally { button.prop('disabled', false).html(original); }
+    });
     $('#ntr-test').on('click', async () => {
         try {
             const config = currentConfig();

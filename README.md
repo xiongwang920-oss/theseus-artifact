@@ -19,6 +19,7 @@ A third-party front-end extension for **SillyTavern 1.12+** that both prevents a
 - Gold-on-dark theme with motion: animated progress stripes, floating launcher with a pulsing halo, staggered result cards, pulsing highlights on hits, and hover sheen on buttons. The launcher and panel header use a hand-drawn SVG emblem of Theseus driving a sword through the Minotaur's head. All animation is disabled automatically for users who prefer reduced motion.
 - Greeting rewrite: the "开场白改写" card lists every greeting of the current character card (`first_mes` and all `alternate_greetings`) so you can open the editor without scanning first and without a NTR hit; greeting rows in the scan results also carry the "改写 / 抹除开场白" button unconditionally. Inside the editor you can rewrite with your model, strip the quoted evidence locally (only for scanned hits), review the result, and save it back to the character card. Card edits only affect new chats; use "同步到当前聊天" to also write the new greeting into the first message of the current chat. The editor keeps a running log showing which URL each request went to and what the server answered, which makes a failed rewrite easy to diagnose.
 - Editor layout: the text area fills all remaining height automatically, so there is nothing to drag and the first line can no longer be pushed out of view. The title bar can be held to drag the dialog (desktop), double-click it to reset the position. On phones the dialog fills the screen, buttons wrap, and the text area gets the maximum available height.
+- Built-in rewrite prompt: not limited to textbook NTR — being touched, embraced, kissed, trained, marked or watched by a third party is in scope as well. It also insists that dialogue, action, environment, inner monologue and narration are all rewritten, so the model cannot merely soften the lines and leave the narration describing what was done to the character. The content that should be kept is listed explicitly (handshakes, passing objects, helping someone injured, ordinary conversation with third parties, intimacy with `{{user}}`) to avoid over-rewriting. Used only when the custom prompt box is left empty.
 - Version and update check: the badge at the top of the panel shows the installed version. On startup the extension quietly asks GitHub for the latest version (at most once every 12 hours, toggleable under 检测行为) and shows a banner plus a "查看更新" link when a newer one exists; you can also press "检查更新" at any time. It tries `raw.githubusercontent.com` then jsDelivr, and stays silent when neither is reachable.
 - Text is split into chunks by paragraph, pre-filtered locally by keywords, then sent to your model for strict JSON output. The pre-filter can be disabled.
 - Configurable concurrency, timeout, retries, and cancellation. The scan aborts automatically after 3 consecutive failures and keeps already-completed results.
@@ -37,7 +38,7 @@ If you installed it by copying the folder by hand, `auto_update` does nothing. U
 
 ### Configuration
 
-Fill in the API Base URL, API Key, and model name, then click "测试连接" (Test connection). The API Base URL is the root address of an OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; the extension sends non-streaming requests to its `/chat/completions`. When accessing a custom endpoint directly from the browser, the server must allow the SillyTavern page's origin via CORS.
+Fill in the API Base URL, API Key, and model name, then click "测试连接" (Test connection). The model name can be typed by hand, or pulled from the endpoint's `/models` with the "拉取模型列表" button and picked from the drop-down, so switching models no longer means retyping the id. The API Base URL is the root address of an OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; the extension sends non-streaming requests to its `/chat/completions`. When accessing a custom endpoint directly from the browser, the server must allow the SillyTavern page's origin via CORS.
 
 ### Security & privacy
 
@@ -60,6 +61,7 @@ The API Key is stored in SillyTavern's `extension_settings['ntr-detector']` and 
 - 暗金主题 + 动效：进度条流动条纹、悬浮球轻微浮动与脉冲光环、结果卡片依次滑入、命中项呼吸高亮、按钮悬停扫光。悬浮球与面板标题使用手绘 SVG 徽标——一只手握剑贯穿牛头（忒修斯斩杀弥诺陶洛斯）。系统开启「减少动态效果」时会自动关闭全部动画。
 - 开场白改写：面板里的「开场白改写」卡片直接列出当前角色卡的全部开场白（`first_mes` 与所有 `alternate_greetings`），不需要先扫描、也不要求命中 NTR 就能打开改写器；扫描结果里的开场白条目也一律带「改写 / 抹除开场白」按钮。改写器内可用模型「AI 改写」、本地「抹除命中片段」（仅扫描命中的条目可用），确认后保存回角色卡。角色卡的改动只影响新建聊天，若要让当前聊天也变化，可再点「同步到当前聊天」把新开场白写进当前聊天的第一条消息。改写器底部带运行日志，逐步显示请求发往哪个地址、服务端返回了什么状态，便于排查改写失败的原因。
 - 改写器适配：文本框自动占满弹窗的剩余高度（无需手动拖拽，也不会再出现首行被顶出可视区的情况）；标题栏可按住拖动，桌面端能把弹窗挪开以查看被挡住的正文，双击标题栏复位；手机端弹窗自动铺满整屏，按钮自动换行，文本框拿到最大可用高度。
+- 内置改写提示词：不局限于典型 NTR，「被第三方抚摸、搂抱、亲吻、调教、标记、窥视」这类非典型情形也在清理范围内，并明确要求对话／动作／环境／心理／旁白一起改，避免模型只改对白而把叙述留在原文里。同时列出应当保留的内容（握手、递东西、搀扶救治、与第三方的正常对话、与 `{{user}}` 的亲密描写），以免改写过度。仅当自定义提示词留空时使用。
 - 版本号与更新检查：面板顶部徽章显示当前版本。默认在启动后静默检查一次 GitHub 上的最新版本（每 12 小时最多一次，可在「检测行为」里关掉），发现新版时在面板顶部给出提示条和「查看更新」入口；也可以随时点「检查更新」手动查。检查源依次尝试 `raw.githubusercontent.com` 与 jsDelivr，都不可达时静默跳过，不会打扰使用。
 - 文本按段落切块，先用本地关键词粗筛，再向自配模型请求严格 JSON。可关闭粗筛。
 - 扫描并发、超时、重试与取消均可配置或控制。连续 3 项失败时自动中止，保留已完成结果。
@@ -80,7 +82,7 @@ The API Key is stored in SillyTavern's `extension_settings['ntr-detector']` and 
 
 ### 配置
 
-填写 API Base URL、API Key 和模型名称，点击「测试连接」。API Base URL 是 OpenAI 兼容接口的根地址，默认 `https://api.openai.com/v1`；扩展会向其 `/chat/completions` 发送非流式请求。浏览器直接访问自定义接口时，服务端需要允许 SillyTavern 页面的 CORS 来源。
+填写 API Base URL、API Key 和模型名称，点击「测试连接」。模型名称可以直接手填，也可以点「拉取模型列表」从接口的 `/models` 端点拉取后在下拉里选，省得换模型时手打名字。API Base URL 是 OpenAI 兼容接口的根地址，默认 `https://api.openai.com/v1`；扩展会向其 `/chat/completions` 发送非流式请求。浏览器直接访问自定义接口时，服务端需要允许 SillyTavern 页面的 CORS 来源。
 
 ### 安全与隐私
 
