@@ -630,6 +630,14 @@
     scrollbar-width: thin;
     color: inherit;
 }
+/* 世界书模式区块 */
+#ntr-detector-panel .ntr-wb {
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    border-radius: 9px;
+    border: 1px dashed rgba(224, 179, 82, .35);
+    background: rgba(224, 179, 82, .05);
+}
 #ntr-detector-panel .ntr-greet-preview {
     margin-top: 3px;
     padding: 6px 8px;

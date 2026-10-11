@@ -119,6 +119,7 @@ const DEFAULTS = {
     floatX: null, floatY: null, launcherX: null, launcherY: null,
     checkUpdate: true, updateCheckedAt: 0,
     rulePosition: 'both', ruleDepth: 0, ruleRole: 0, ruleBoost: true,
+    ruleMode: 'extension', wbPosition: 0,
     rewriteMode: 'standard', rewriteChunkSize: 2000, cache: {},
 };
 const KEYWORDS = /ntr|netorare|netori|netorase|寝取(?:られ|り)?|绿帽|綠帽|绿奴|綠奴|戴绿|戴綠|被绿|被綠|出轨|出軌|偷情|劈腿|cuckold|cuckquean|cheating/i;
@@ -186,18 +187,117 @@ function save() { saveSettingsDebounced(); }
 // 规则注入。位置 / 深度 / 角色都做成可配置：不同预设与模型对「规则放在哪」的敏感度差别很大。
 // 写死成 IN_PROMPT + depth 0 时，若模型只在思考里认规则、落笔就忘，通常就是规则离生成点太远——
 // 把位置改成「仅聊天内」并把深度调小，效果往往立刻不同。
+// ——— 世界书模式 ———
+// 扩展提示词只有 IN_PROMPT / IN_CHAT 两个落点，而世界书条目有 8 个（含「角色定义之前」）。
+// 既然世界书这条路被实测有效，就把它做成可选项：只在用户主动点击时才写文件，且随时可删。
+const WORLDBOOK_NAME = '忒修斯神器·纯爱规则';
+const WB_POSITIONS = [
+    { value: 0, label: '角色定义之前 ↑Char（最接近「设定」，推荐）' },
+    { value: 1, label: '角色定义之后 ↓Char' },
+    { value: 2, label: '作者注释之前 ↑AT' },
+    { value: 3, label: '作者注释之后 ↓AT' },
+    { value: 4, label: '聊天内指定深度 @D（深度取上方设置）' },
+];
+function buildWorldbook() {
+    return {
+        name: WORLDBOOK_NAME,
+        data: {
+            entries: {
+                0: {
+                    uid: 0,
+                    key: ['忒修斯神器', '纯爱规则'],
+                    keysecondary: [],
+                    comment: '忒修斯神器 · 绝对纯爱规则',
+                    content: substituteUserName(PURE_LOVE_RULE),
+                    constant: true,
+                    vectorized: false,
+                    selective: false,
+                    selectiveLogic: 0,
+                    addMemo: true,
+                    order: 100,
+                    position: clamp(settings.wbPosition, 0, 4, 0),
+                    disable: false,
+                    excludeRecursion: true,
+                    preventRecursion: true,
+                    delayUntilRecursion: false,
+                    probability: 100,
+                    useProbability: true,
+                    depth: clamp(settings.ruleDepth, 0, 20, 0),
+                    group: '',
+                    groupOverride: false,
+                    groupWeight: 100,
+                    scanDepth: null,
+                    caseSensitive: null,
+                    matchWholeWords: null,
+                    useGroupScoring: null,
+                    automationId: '',
+                    role: clamp(settings.ruleRole, 0, 2, 0),
+                    sticky: 0,
+                    cooldown: 0,
+                    delay: 0,
+                    displayIndex: 0,
+                },
+            },
+        },
+    };
+}
+async function writeWorldbook(log = () => { }) {
+    log(`写入世界书「${WORLDBOOK_NAME}」…`);
+    const response = await fetch('/api/worldinfo/edit', {
+        method: 'POST', headers: getRequestHeaders(), cache: 'no-cache',
+        body: JSON.stringify(buildWorldbook()),
+    });
+    if (!response.ok) throw new Error(`写入世界书失败（HTTP ${response.status}）${await readErrorSnippet(response)}`);
+    log('← 世界书已写入');
+}
+async function deleteWorldbook(log = () => { }) {
+    log(`删除世界书「${WORLDBOOK_NAME}」…`);
+    const response = await fetch('/api/worldinfo/delete', {
+        method: 'POST', headers: getRequestHeaders(), cache: 'no-cache',
+        body: JSON.stringify({ name: WORLDBOOK_NAME }),
+    });
+    if (!response.ok) throw new Error(`删除世界书失败（HTTP ${response.status}）${await readErrorSnippet(response)}`);
+    log('← 世界书已删除');
+}
+// 只看状态，不写入：确认是否已生成、是否已在酒馆里被选中
+async function refreshWorldbookState() {
+    const status = $('#ntr-wb-state');
+    if (!status.length) return;
+    let exists = false;
+    try {
+        const response = await fetch('/api/worldinfo/get', {
+            method: 'POST', headers: getRequestHeaders(), cache: 'no-cache',
+            body: JSON.stringify({ name: WORLDBOOK_NAME }),
+        });
+        exists = response.ok;
+    } catch {
+        status.text('当前状态：读取失败（世界书接口不可用）');
+        return;
+    }
+    let active = false;
+    try {
+        const current = getWorldInfoSettings()?.world_info;
+        active = Array.isArray(current) ? current.includes(WORLDBOOK_NAME) : current === WORLDBOOK_NAME;
+    } catch { active = false; }
+    status.text(exists
+        ? `当前状态：已生成${active ? ' · 已在酒馆中激活' : ' · 尚未激活（需在世界书里选中或绑定到角色卡）'}`
+        : '当前状态：尚未生成');
+    $('#ntr-wb-remove').prop('disabled', !exists);
+}
 const RULE_KEYS = ['ntr-pure-love-system', 'ntr-pure-love-chat', 'ntr-pure-love-boost'];
 const RULE_ROLES = [extension_prompt_roles.SYSTEM, extension_prompt_roles.USER, extension_prompt_roles.ASSISTANT];
 function applyPureLoveRule() {
+    // 世界书模式下不再注入扩展提示词，免得同一份规则在上下文里出现两遍
+    const useExtension = settings.ruleMode !== 'worldbook';
     const depth = clamp(settings.ruleDepth, 0, 20, 0);
     const role = RULE_ROLES[Number(settings.ruleRole)] ?? extension_prompt_roles.SYSTEM;
     const position = ['both', 'prompt', 'chat'].includes(settings.rulePosition) ? settings.rulePosition : 'both';
-    const useFull = position === 'both' || position === 'prompt';
-    const useChat = position === 'both' || position === 'chat';
+    const useFull = useExtension && (position === 'both' || position === 'prompt');
+    const useChat = useExtension && (position === 'both' || position === 'chat');
     // 三个 key 每次都给值（用不到的写空串），这样改配置不会把上一次的内容残留在 extension_prompts 里
     setExtensionPrompt(RULE_KEYS[0], useFull ? PURE_LOVE_RULE : '', extension_prompt_types.IN_PROMPT, 0, false, role);
     setExtensionPrompt(RULE_KEYS[1], useChat ? PURE_LOVE_RULE : '', extension_prompt_types.IN_CHAT, depth, false, role);
-    setExtensionPrompt(RULE_KEYS[2], settings.ruleBoost ? PURE_LOVE_ENFORCER : '', extension_prompt_types.IN_CHAT, depth + 4, false, role);
+    setExtensionPrompt(RULE_KEYS[2], (useExtension && settings.ruleBoost) ? PURE_LOVE_ENFORCER : '', extension_prompt_types.IN_CHAT, depth + 4, false, role);
 }
 // 把当前的注入配置和规则正文摊开给用户看，方便对照世界书的设置排查
 function describePureLoveRule() {
@@ -965,6 +1065,7 @@ function buildUI() {
       </section>
       <section class="ntr-card"><h4><i class="fa-solid fa-shield-halved"></i>纯爱规则注入</h4>
       <div class="ntr-hint">规则在每次生成时静默注入，不写入角色卡或世界书。若模型「思考时认规则、落笔就忘」，多半是注入位置离生成点太远——试着把位置改成「仅聊天内」，深度调到 0～2。</div>
+      <label>注入方式<select id="ntr-rule-mode" class="text_pole"><option value="extension">扩展提示词（默认，不写任何文件）</option><option value="worldbook">世界书条目（与其它世界书同机制，可选「角色定义之前」）</option></select></label>
       <label>注入位置<select id="ntr-rule-position" class="text_pole"><option value="both">故事文本之后 + 聊天内（默认）</option><option value="chat">仅聊天内（离生成点最近，通常最有效）</option><option value="prompt">仅故事文本之后</option></select></label>
       <div class="ntr-grid">
       <label>聊天内深度（0 最靠后）<input id="ntr-rule-depth" class="text_pole" type="number" min="0" max="20" step="1"></label>
@@ -973,6 +1074,12 @@ function buildUI() {
       <label class="ntr-check"><input id="ntr-rule-boost" type="checkbox">在更靠前的深度再补一条简版（提高遵循度）</label>
       <div class="ntr-actions"><button id="ntr-rule-preview" class="menu_button" type="button"><i class="fa-solid fa-eye"></i>查看当前注入</button></div>
       <pre id="ntr-rule-preview-box" class="ntr-rule-preview ntr-hidden"></pre>
+      <div id="ntr-wb-box" class="ntr-wb ntr-hidden">
+      <label>世界书条目位置<select id="ntr-wb-position" class="text_pole"></select></label>
+      <div class="ntr-actions"><button id="ntr-wb-write" class="menu_button ntr-primary" type="button"><i class="fa-solid fa-book"></i>生成 / 更新世界书</button><button id="ntr-wb-remove" class="menu_button" type="button"><i class="fa-solid fa-trash-can"></i>删除世界书</button></div>
+      <div id="ntr-wb-state" class="ntr-hint">当前状态：未检测</div>
+      <div class="ntr-hint">名字固定为「忒修斯神器·纯爱规则」。生成后还需要在酒馆的「世界书」面板里选中它，或把它绑定到角色卡，才会生效；不想要了随时可以点上面的删除。</div>
+      </div>
       </section>
       <section class="ntr-card"><h4><i class="fa-solid fa-comment-dots"></i>提示词</h4>
       <label>自定义检测系统提示词（留空使用内置提示词）<textarea id="ntr-prompt" class="text_pole" rows="5"></textarea></label>
@@ -1013,7 +1120,7 @@ function buildUI() {
     document.body.append(floatBox, launcher);
     // 先挂到文档中，保证下面的选择器能取到表单控件；浮窗模式稍后由 applyPanelMode 搬移。
     document.querySelector('#extensions_settings')?.append(panel);
-    const map = { '#ntr-url': 'baseUrl', '#ntr-key': 'apiKey', '#ntr-model': 'model', '#ntr-temp': 'temperature', '#ntr-concurrency': 'concurrency', '#ntr-timeout': 'timeout', '#ntr-chunk': 'chunkSize', '#ntr-prompt': 'prompt', '#ntr-rewrite': 'rewritePrompt', '#ntr-skip': 'skipPrefilter', '#ntr-chat': 'scanChat', '#ntr-realtime': 'realtime', '#ntr-autocard': 'autoCard', '#ntr-update-auto': 'checkUpdate', '#ntr-rule-position': 'rulePosition', '#ntr-rule-depth': 'ruleDepth', '#ntr-rule-role': 'ruleRole', '#ntr-rule-boost': 'ruleBoost', '#ntr-rewrite-mode': 'rewriteMode', '#ntr-rewrite-chunk': 'rewriteChunkSize' };
+    const map = { '#ntr-url': 'baseUrl', '#ntr-key': 'apiKey', '#ntr-model': 'model', '#ntr-temp': 'temperature', '#ntr-concurrency': 'concurrency', '#ntr-timeout': 'timeout', '#ntr-chunk': 'chunkSize', '#ntr-prompt': 'prompt', '#ntr-rewrite': 'rewritePrompt', '#ntr-skip': 'skipPrefilter', '#ntr-chat': 'scanChat', '#ntr-realtime': 'realtime', '#ntr-autocard': 'autoCard', '#ntr-update-auto': 'checkUpdate', '#ntr-rule-position': 'rulePosition', '#ntr-rule-depth': 'ruleDepth', '#ntr-rule-role': 'ruleRole', '#ntr-rule-boost': 'ruleBoost', '#ntr-rule-mode': 'ruleMode', '#ntr-wb-position': 'wbPosition', '#ntr-rewrite-mode': 'rewriteMode', '#ntr-rewrite-chunk': 'rewriteChunkSize' };
     for (const [selector, key] of Object.entries(map)) {
         const input = $(selector);
         input.prop('type') === 'checkbox' ? input.prop('checked', settings[key]) : input.val(settings[key]);
@@ -1030,6 +1137,33 @@ function buildUI() {
         const box = $('#ntr-rule-preview-box');
         if (!box.hasClass('ntr-hidden')) return box.addClass('ntr-hidden');
         box.text(describePureLoveRule()).removeClass('ntr-hidden');
+    });
+    // 世界书模式
+    const wbSelect = $('#ntr-wb-position');
+    for (const item of WB_POSITIONS) wbSelect.append(new Option(item.label, String(item.value)));
+    wbSelect.val(String(clamp(settings.wbPosition, 0, 4, 0)));
+    const syncRuleMode = () => {
+        const isWorldbook = settings.ruleMode === 'worldbook';
+        $('#ntr-wb-box').toggleClass('ntr-hidden', !isWorldbook);
+        applyPureLoveRule();
+        if (isWorldbook) refreshWorldbookState();
+    };
+    $('#ntr-rule-mode').on('change', syncRuleMode);
+    syncRuleMode();
+    $('#ntr-wb-write').on('click', async () => {
+        const button = $('#ntr-wb-write');
+        button.prop('disabled', true);
+        try {
+            await writeWorldbook();
+            note(`世界书「${WORLDBOOK_NAME}」已写入；请到酒馆的「世界书」里选中它（或绑定到角色卡）才会生效。`, 'success');
+        } catch (error) { note(error.message, 'error'); }
+        finally { button.prop('disabled', false); await refreshWorldbookState(); }
+    });
+    $('#ntr-wb-remove').on('click', async () => {
+        if (!window.confirm(`确定删除世界书「${WORLDBOOK_NAME}」？`)) return;
+        try { await deleteWorldbook(); note('世界书已删除。', 'success'); }
+        catch (error) { note(error.message, 'error'); }
+        finally { await refreshWorldbookState(); }
     });
     $('#ntr-models').on('click', async () => {
         const button = $('#ntr-models');
