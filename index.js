@@ -1354,6 +1354,9 @@ window.addEventListener('click', event => {
 // 通用拖动：按住 handle 移动 target，松手时把最终位置写进设置。
 function attachDrag(handle, target, apply) {
     if (!handle) return;
+    // 把手本身可能就是按钮（悬浮球就是）。这种时候不能再按「点到按钮就跳过」判断，
+    // 否则球会把 pointerdown 判给自己，永远拖不动。
+    const handleIsControl = handle.matches('button, a, input, select, textarea');
     let dragging = false;
     let moved = false;
     let fromX = 0;
@@ -1364,7 +1367,7 @@ function attachDrag(handle, target, apply) {
     let lastTop = 0;
     handle.addEventListener('pointerdown', event => {
         if (event.pointerType === 'mouse' && event.button !== 0) return;
-        if (event.target.closest('button, a, input, select, textarea')) return;
+        if (!handleIsControl && event.target.closest('button, a, input, select, textarea')) return;
         const node = target();
         if (!node) return;
         const rect = node.getBoundingClientRect();
